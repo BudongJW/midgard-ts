@@ -59,13 +59,19 @@ export function saveDatabase(): void {
 export function queryAll<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[] {
   const d = getDb();
   const stmt = d.prepare(sql);
-  if (params) stmt.bind(params);
-  const rows: T[] = [];
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject() as T);
+  try {
+    if (params) stmt.bind(params);
+    const rows: T[] = [];
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject() as T);
+    }
+    return rows;
+  } catch (err) {
+    log.error(`Query failed: ${sql} — ${err}`);
+    return [];
+  } finally {
+    stmt.free();
   }
-  stmt.free();
-  return rows;
 }
 
 /** Convenience: run a query and return the first row */
@@ -75,11 +81,16 @@ export function queryOne<T = Record<string, unknown>>(sql: string, params?: unkn
 }
 
 /** Convenience: run an INSERT/UPDATE/DELETE and return changes info */
-export function execute(sql: string, params?: unknown[]): { lastId: number } {
+export function execute(sql: string, params?: unknown[]): { lastId: number; success: boolean } {
   const d = getDb();
-  d.run(sql, params);
-  const lastId = (queryOne<{ id: number }>('SELECT last_insert_rowid() as id') ?? { id: 0 }).id;
-  return { lastId };
+  try {
+    d.run(sql, params);
+    const lastId = (queryOne<{ id: number }>('SELECT last_insert_rowid() as id') ?? { id: 0 }).id;
+    return { lastId, success: true };
+  } catch (err) {
+    log.error(`Execute failed: ${sql} — ${err}`);
+    return { lastId: 0, success: false };
+  }
 }
 
 function createTables(db: SqlJsDatabase): void {

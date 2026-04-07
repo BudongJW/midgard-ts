@@ -9,6 +9,7 @@ import { PacketReader, PacketWriter, PacketId } from '../common/packet/index.js'
 import { createLogger } from '../common/logger/index.js';
 import { execute, queryOne } from '../common/database/index.js';
 import { SessionManager, type Session } from '../common/net/session.js';
+import { authStore } from '../common/net/auth-store.js';
 import type { ServerConfig } from '../common/config/index.js';
 
 const log = createLogger('Map');
@@ -24,6 +25,9 @@ interface PlayerState {
   baseLevel: number;
   jobLevel: number;
 }
+
+const MAX_CHAT_LENGTH = 255;
+const CONNECTION_TIMEOUT_MS = 120_000; // 2 min idle timeout
 
 export class MapServer {
   private sessions = new SessionManager();
@@ -50,6 +54,12 @@ export class MapServer {
   private onConnection(socket: Socket): void {
     const session = this.sessions.create(socket);
     log.info(`New connection from ${session.ip}`);
+
+    socket.setTimeout(CONNECTION_TIMEOUT_MS, () => {
+      log.info(`Connection timeout for ${session.ip}`);
+      this.onDisconnect(session);
+      socket.destroy();
+    });
 
     let packetBuffer = Buffer.alloc(0);
 
@@ -97,8 +107,10 @@ export class MapServer {
       case PacketId.CZ_REQUEST_TIME:
         return this.handleKeepAlive(session, buffer);
       default:
+        // Unknown packets: skip 2 bytes (header) to attempt recovery
+        // In production, a packet length table should be used
         log.debug(`Unhandled packet 0x${packetId.toString(16).padStart(4, '0')} from ${session.ip}`);
-        return buffer.length;
+        return 2;
     }
   }
 
@@ -117,6 +129,14 @@ export class MapServer {
     session.loginId1 = reader.readUInt32LE();
     const clientTick = reader.readUInt32LE();
     session.sex = reader.readUInt8();
+
+    // Validate session from char server
+    if (!authStore.validate(session.accountId, session.loginId1, session.loginId2)) {
+      log.warn(`Auth failed for account ${session.accountId} from ${session.ip}`);
+      session.socket.destroy();
+      return PACKET_LEN;
+    }
+    authStore.consume(session.accountId);
 
     const char = queryOne<{
       id: number; name: string; last_map: string; last_x: number; last_y: number;
@@ -179,8 +199,9 @@ export class MapServer {
     const b1 = reader.readUInt8();
     const b2 = reader.readUInt8();
 
-    const destX = (b0 << 2) | (b1 >> 6);
-    const destY = ((b1 & 0x3F) << 4) | (b2 >> 4);
+    // Decode WBUFPOS: x = 10 bits, y = 10 bits, dir = 4 bits
+    const destX = (b0 << 2) | ((b1 >> 6) & 0x03);
+    const destY = ((b1 & 0x3F) << 4) | ((b2 >> 4) & 0x0F);
     const dir = b2 & 0x0F;
 
     const player = this.players.get(session.accountId);
@@ -210,6 +231,10 @@ export class MapServer {
   private handleChat(session: Session, buffer: Buffer): number {
     if (buffer.length < 4) return 0;
     const length = buffer.readUInt16LE(2);
+    if (length < 4 || length > MAX_CHAT_LENGTH + 4) {
+      log.warn(`Invalid chat length ${length} from ${session.ip}`);
+      return Math.max(length, 4); // consume and discard
+    }
     if (buffer.length < length) return 0;
 
     const reader = new PacketReader(buffer);
@@ -236,22 +261,30 @@ export class MapServer {
     return length;
   }
 
+  /**
+   * Encode (x, y, dir) into 3 bytes — rAthena WBUFPOS format
+   * x = 10 bits, y = 10 bits, dir = 4 bits = 24 bits = 3 bytes
+   */
   private encodePosition(x: number, y: number, dir: number): [number, number, number] {
     return [
       (x >> 2) & 0xFF,
-      ((x << 6) | ((y >> 4) & 0x3F)) & 0xFF,
-      ((y << 4) | (dir & 0x0F)) & 0xFF,
+      (((x & 0x03) << 6) | ((y >> 4) & 0x3F)) & 0xFF,
+      (((y & 0x0F) << 4) | (dir & 0x0F)) & 0xFF,
     ];
   }
 
+  /**
+   * Encode movement (x0,y0 -> x1,y1) into 6 bytes — rAthena WBUFPOS2 format
+   * x0 = 10 bits, y0 = 10 bits, x1 = 10 bits, y1 = 10 bits, sx = 4 bits, sy = 4 bits
+   */
   private encodeMovePosition(x0: number, y0: number, x1: number, y1: number): number[] {
     return [
       (x0 >> 2) & 0xFF,
-      ((x0 << 6) | ((y0 >> 4) & 0x3F)) & 0xFF,
-      ((y0 << 4) | ((x1 >> 6) & 0x0F)) & 0xFF,
-      ((x1 << 2) | ((y1 >> 8) & 0x03)) & 0xFF,
+      (((x0 & 0x03) << 6) | ((y0 >> 4) & 0x3F)) & 0xFF,
+      (((y0 & 0x0F) << 4) | ((x1 >> 6) & 0x0F)) & 0xFF,
+      (((x1 & 0x3F) << 2) | ((y1 >> 8) & 0x03)) & 0xFF,
       y1 & 0xFF,
-      ((8 << 4) | 8) & 0xFF,
+      ((8 << 4) | 8) & 0xFF, // sx=8, sy=8 (center of cell)
     ];
   }
 

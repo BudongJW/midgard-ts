@@ -9,6 +9,7 @@ import { PacketReader, PacketWriter, PacketId } from '../common/packet/index.js'
 import { createLogger } from '../common/logger/index.js';
 import { queryAll, queryOne, execute } from '../common/database/index.js';
 import { SessionManager, type Session } from '../common/net/session.js';
+import { authStore } from '../common/net/auth-store.js';
 import type { ServerConfig } from '../common/config/index.js';
 
 const log = createLogger('Char');
@@ -75,6 +76,11 @@ export class CharServer {
     const session = this.sessions.create(socket);
     log.info(`New connection from ${session.ip}`);
 
+    socket.setTimeout(60_000, () => {
+      log.info(`Connection timeout for ${session.ip}`);
+      socket.destroy();
+    });
+
     let packetBuffer = Buffer.alloc(0);
 
     socket.on('data', (data) => {
@@ -112,7 +118,8 @@ export class CharServer {
       case PacketId.CZ_REQUEST_TIME:
         return this.handleKeepAlive(session, buffer);
       default:
-        log.warn(`Unknown packet 0x${packetId.toString(16).padStart(4, '0')} from ${session.ip}`);
+        log.warn(`Unknown packet 0x${packetId.toString(16).padStart(4, '0')} from ${session.ip}, closing`);
+        session.socket.destroy();
         return buffer.length;
     }
   }
@@ -130,6 +137,23 @@ export class CharServer {
     session.accountId = reader.readUInt32LE();
     session.loginId1 = reader.readUInt32LE();
     session.loginId2 = reader.readUInt32LE();
+
+    // Validate session from login server
+    if (!authStore.validate(session.accountId, session.loginId1, session.loginId2)) {
+      log.warn(`Auth failed for account ${session.accountId} from ${session.ip}`);
+      session.socket.destroy();
+      return PACKET_LEN;
+    }
+
+    // Re-register session for map server handoff
+    authStore.register({
+      accountId: session.accountId,
+      loginId1: session.loginId1,
+      loginId2: session.loginId2,
+      sex: 0,
+      ip: session.ip,
+      createdAt: Date.now(),
+    });
 
     log.info(`Char enter for account ${session.accountId}`);
     this.sendCharList(session);

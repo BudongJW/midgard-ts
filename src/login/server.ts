@@ -10,12 +10,18 @@ import { createLogger } from '../common/logger/index.js';
 import { hashPassword, verifyPassword, generateSessionId } from '../common/crypto/index.js';
 import { queryOne, execute } from '../common/database/index.js';
 import { SessionManager, type Session } from '../common/net/session.js';
+import { authStore } from '../common/net/auth-store.js';
+import { RateLimiter } from '../common/net/rate-limiter.js';
 import type { ServerConfig } from '../common/config/index.js';
 
 const log = createLogger('Login');
 
+const MAX_LOGIN_ATTEMPTS = 10;   // per IP per minute
+const CONNECTION_TIMEOUT_MS = 30_000;
+
 export class LoginServer {
   private sessions = new SessionManager();
+  private rateLimiter = new RateLimiter(MAX_LOGIN_ATTEMPTS, 60_000);
   private config: ServerConfig;
 
   constructor(config: ServerConfig) {
@@ -38,6 +44,12 @@ export class LoginServer {
   private onConnection(socket: Socket): void {
     const session = this.sessions.create(socket);
     log.info(`New connection from ${session.ip} (session ${session.id})`);
+
+    // Connection idle timeout
+    socket.setTimeout(CONNECTION_TIMEOUT_MS, () => {
+      log.info(`Connection timeout for ${session.ip}`);
+      socket.destroy();
+    });
 
     let packetBuffer = Buffer.alloc(0);
 
@@ -70,7 +82,8 @@ export class LoginServer {
       case PacketId.CZ_REQUEST_TIME:
         return this.handleKeepAlive(session, buffer);
       default:
-        log.warn(`Unknown packet 0x${packetId.toString(16).padStart(4, '0')} from ${session.ip}`);
+        log.warn(`Unknown packet 0x${packetId.toString(16).padStart(4, '0')} from ${session.ip}, closing`);
+        session.socket.destroy();
         return buffer.length;
     }
   }
@@ -92,6 +105,13 @@ export class LoginServer {
     const clientType = reader.readUInt8();
 
     log.info(`Login attempt: ${username} (v${version}, type=${clientType})`);
+
+    // Rate limit check
+    if (!this.rateLimiter.check(session.ip)) {
+      log.warn(`Rate limited: ${session.ip}`);
+      this.sendLoginRefuse(session, 6); // 6 = server full (closest available code)
+      return PACKET_LEN;
+    }
 
     const account = queryOne<{ id: number; password: string; group_id: number; state: number }>(
       'SELECT id, password, group_id, state FROM accounts WHERE username = ?',
@@ -136,11 +156,23 @@ export class LoginServer {
     session.loginId1 = generateSessionId();
     session.loginId2 = generateSessionId();
 
+    // Register session for inter-server authentication
+    authStore.register({
+      accountId,
+      loginId1: session.loginId1,
+      loginId2: session.loginId2,
+      sex: 0,
+      ip: session.ip,
+      createdAt: Date.now(),
+    });
+
     const charHost = this.config.char.host === '0.0.0.0' ? '127.0.0.1' : this.config.char.host;
     const charPort = this.config.char.port;
     const ipParts = charHost.split('.').map(Number);
 
-    const writer = new PacketWriter(64);
+    // AC_ACCEPT_LOGIN: header(4) + loginId1(4) + accountId(4) + loginId2(4) + unused(4) + lastLogin(26) + sex(1) = 47 base
+    // + char server entries (32 bytes each)
+    const writer = new PacketWriter(80);
     writer.writeUInt16LE(PacketId.AC_ACCEPT_LOGIN);
     writer.writeUInt16LE(47 + 32);
     writer.writeUInt32LE(session.loginId1);
