@@ -1,0 +1,32 @@
+{
+  "name": "midgard-ts",
+  "version": "0.1.0",
+  "description": "A Ragnarok Online server emulator written in TypeScript, inspired by rAthena and Hercules",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "dev:login": "tsx src/login/server.ts",
+    "dev:char": "tsx src/char/server.ts",
+    "dev:map": "tsx src/map/server.ts",
+    "test": "vitest run",
+    "lint": "eslint src/"
+  },
+  "keywords": ["ragnarok-online", "mmorpg", "server-emulator", "game-server"],
+  "license": "GPL-2.0",
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0",
+    "@types/sql.js": "^1.4.0"
+  },
+  "dependencies": {
+    "sql.js": "^1.11.0",
+    "yaml": "^2.6.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

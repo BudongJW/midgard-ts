@@ -1,0 +1,31 @@
+# MidgardTS Server Configuration
+# Inspired by rAthena's conf/ structure
+
+login:
+  host: "0.0.0.0"
+  port: 6900
+  newAccountAllowed: true          # Auto-create accounts on first login
+
+char:
+  host: "0.0.0.0"
+  port: 6121
+  maxSlots: 9                      # Max character slots per account
+  startZeny: 0                     # Starting Zeny for new characters
+  startMap: "new_1-1"              # Starting map (Training Ground)
+  startX: 53
+  startY: 111
+
+map:
+  host: "0.0.0.0"
+  port: 5121
+  maxBaseLevel: 99
+  maxJobLevel: 50
+  baseExpRate: 100                 # 100 = 1x rate
+  jobExpRate: 100
+  dropRate: 100
+
+database:
+  path: "./data/midgard.db"
+
+network:
+  packetVersion: 20211103
