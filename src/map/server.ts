@@ -24,6 +24,9 @@ import {
   SKILL_PACKET_ID, SKILL_GROUND_PACKET_ID, clearCooldowns,
 } from './skill/skill-handler.js';
 import { updateMemberPosition, setMemberOnline } from './party/party-manager.js';
+import { setGuildMemberOnline, donateGuildExp } from './guild/guild-manager.js';
+import { isPvpMap } from './pvp/pvp-manager.js';
+import { tickPetHunger } from './pet/pet-handler.js';
 
 const log = createLogger('Map');
 
@@ -63,11 +66,14 @@ export class MapServer {
       this.activeMaps.add(map);
     }
 
-    // Monster AI tick every 1 second
+    // Monster AI + pet hunger tick every 1 second
     setInterval(() => {
       const now = Date.now();
       for (const map of this.activeMaps) {
         tickMobAi(map, now);
+      }
+      for (const [, player] of this.players) {
+        tickPetHunger(player.charId, now);
       }
     }, 1000);
 
@@ -122,6 +128,7 @@ export class MapServer {
       this.players.delete(session.accountId);
       clearCooldowns(session.accountId);
       setMemberOnline(session.accountId, false);
+      setGuildMemberOnline(session.accountId, false);
       log.info(`Player ${player.charName} disconnected, position saved`);
     }
     this.sessions.remove(session.socket);

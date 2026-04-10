@@ -90,8 +90,18 @@ src/
     ├── skill/
     │   ├── skill-db.ts     # 11 skills (Bash, Bolts, Heal, etc.)
     │   └── skill-handler.ts # SP cost, cooldown, effect processing
-    └── party/
-        └── party-manager.ts # Create/join/leave, EXP share
+    ├── party/
+    │   └── party-manager.ts # Create/join/leave, EXP share
+    ├── guild/
+    │   └── guild-manager.ts # Guild CRUD, positions, EXP tax, alliances
+    ├── pvp/
+    │   └── pvp-manager.ts  # PvP maps, rankings, WoE castles
+    ├── pet/
+    │   ├── pet-db.ts       # 7 tameable pets, bonuses
+    │   └── pet-handler.ts  # Tame, hatch, feed, intimacy, stat bonus
+    └── trade/
+        ├── vending.ts      # Player shops (vending)
+        └── trade-handler.ts # P2P item/zeny trading
 ```
 
 ### Status
@@ -106,10 +116,12 @@ src/
 - [x] Combat system (RO damage formula, HIT/FLEE, crit, EXP/drops, level-up)
 - [x] Skill system (11 skills, SP cost, cooldowns, offensive & support)
 - [x] Party system (create/join/leave, even EXP share with range check)
-- [ ] Guild system
-- [ ] PvP / War of Emperium
-- [ ] Pet system
-- [ ] Vending / trade
+- [x] Guild system (create, positions, EXP tax, alliances/enemies, level-up)
+- [x] PvP system (PvP maps, kill/death rankings, GvG mode)
+- [x] War of Emperium (7 castles, emperium break, defense/economy investment)
+- [x] Pet system (7 pets, taming, hatching, feeding, intimacy, stat bonuses)
+- [x] Vending (player shops with item listing)
+- [x] Trade (P2P item/zeny exchange with lock-confirm flow)
 
 ### License
 
@@ -195,7 +207,11 @@ src/
     ├── monster/            # 怪物数据库、刷怪、AI
     ├── combat/             # RO伤害公式、战斗处理、升级
     ├── skill/              # 技能数据库(11)、SP消耗、冷却
-    └── party/              # 组队、经验分配
+    ├── party/              # 组队、经验分配
+    ├── guild/              # 公会 CRUD、职位、经验税、同盟
+    ├── pvp/                # PvP 地图、排行榜、攻城战
+    ├── pet/                # 宠物数据库(7)、亲密度、属性加成
+    └── trade/              # 摆摊、玩家交易
 ```
 
 ### 开发状态
@@ -210,10 +226,12 @@ src/
 - [x] 战斗系统（RO伤害公式、命中/回避、暴击、经验/掉落、升级）
 - [x] 技能系统（11个技能、SP消耗、冷却、攻击与辅助）
 - [x] 组队系统（创建/加入/离开、均分经验与范围检测）
-- [ ] 公会系统
-- [ ] PvP / 攻城战
-- [ ] 宠物系统
-- [ ] 摆摊 / 交易
+- [x] 公会系统（创建、职位、经验税、同盟/敌对、升级）
+- [x] PvP 系统（PvP 地图、击杀/死亡排行、GvG 模式）
+- [x] 攻城战（7座城堡、破碎帝国、防御/经济投资）
+- [x] 宠物系统（7种宠物、驯服、孵化、喂食、亲密度、属性加成）
+- [x] 摆摊（玩家商店、商品上架）
+- [x] 交易（玩家间道具/金币交换、锁定确认流程）
 
 ### 许可证
 
