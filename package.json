@@ -10,7 +10,7 @@
     "dev:login": "tsx src/login/server.ts",
     "dev:char": "tsx src/char/server.ts",
     "dev:map": "tsx src/map/server.ts",
-    "test": "vitest run",
+    "test": "NODE_OPTIONS='--max-old-space-size=512' vitest run",
     "lint": "eslint src/"
   },
   "keywords": ["ragnarok-online", "mmorpg", "server-emulator", "game-server"],

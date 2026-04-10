@@ -11,6 +11,19 @@ import { execute, queryOne } from '../common/database/index.js';
 import { SessionManager, type Session } from '../common/net/session.js';
 import { authStore } from '../common/net/auth-store.js';
 import type { ServerConfig } from '../common/config/index.js';
+import {
+  sendNpcSpawns, handleNpcClick, handleMenuChoice,
+  handleNextScript, handleCloseDialog, handleShopBuy,
+} from './npc/npc-handler.js';
+import { initMapSpawns, getMonstersOnMap, tickMobAi } from './monster/mob-spawner.js';
+import {
+  handleAttackRequest, ATTACK_PACKET_ID, ATTACK_PACKET_LEN,
+} from './combat/combat-handler.js';
+import {
+  handleUseSkill, handleUseSkillGround,
+  SKILL_PACKET_ID, SKILL_GROUND_PACKET_ID, clearCooldowns,
+} from './skill/skill-handler.js';
+import { updateMemberPosition, setMemberOnline } from './party/party-manager.js';
 
 const log = createLogger('Map');
 
@@ -38,9 +51,25 @@ export class MapServer {
     this.config = config;
   }
 
+  private activeMaps = new Set<string>();
+
   start(): void {
     const server = createServer((socket) => this.onConnection(socket));
     const { host, port } = this.config.map;
+
+    // Initialize monster spawns for default maps
+    for (const map of ['new_1-1', 'prontera', 'prt_fild01', 'prt_fild02']) {
+      initMapSpawns(map);
+      this.activeMaps.add(map);
+    }
+
+    // Monster AI tick every 1 second
+    setInterval(() => {
+      const now = Date.now();
+      for (const map of this.activeMaps) {
+        tickMobAi(map, now);
+      }
+    }, 1000);
 
     server.listen(port, host, () => {
       log.status(`Map server listening on ${host}:${port}`);
@@ -91,6 +120,8 @@ export class MapServer {
         player.mapName, player.x, player.y, player.charId,
       ]);
       this.players.delete(session.accountId);
+      clearCooldowns(session.accountId);
+      setMemberOnline(session.accountId, false);
       log.info(`Player ${player.charName} disconnected, position saved`);
     }
     this.sessions.remove(session.socket);
@@ -104,6 +135,22 @@ export class MapServer {
         return this.handleMoveRequest(session, buffer);
       case PacketId.CZ_REQUEST_CHAT:
         return this.handleChat(session, buffer);
+      case PacketId.CZ_CONTACTNPC:
+        return this.handleNpcContact(session, buffer);
+      case PacketId.CZ_CHOOSE_MENU:
+        return this.handleNpcMenu(session, buffer);
+      case PacketId.CZ_REQ_NEXT_SCRIPT:
+        return this.handleNpcNext(session, buffer);
+      case PacketId.CZ_CLOSE_DIALOG:
+        return this.handleNpcClose(session, buffer);
+      case PacketId.CZ_PC_PURCHASE_ITEMLIST:
+        return this.handleBuyItems(session, buffer);
+      case ATTACK_PACKET_ID:
+        return this.handleAttack(session, buffer);
+      case SKILL_PACKET_ID:
+        return this.handleSkill(session, buffer);
+      case SKILL_GROUND_PACKET_ID:
+        return this.handleSkillGround(session, buffer);
       case PacketId.CZ_REQUEST_TIME:
         return this.handleKeepAlive(session, buffer);
       default:
@@ -165,6 +212,7 @@ export class MapServer {
     this.players.set(session.accountId, state);
 
     this.sendMapAccept(session, state, clientTick);
+    sendNpcSpawns(session.socket, state.mapName);
     log.status(`Player ${char.name} entered map ${char.last_map} (${char.last_x},${char.last_y})`);
     return PACKET_LEN;
   }
@@ -221,6 +269,7 @@ export class MapServer {
     for (const byte of moveData) writer.writeUInt8(byte);
 
     session.socket.write(writer.toBuffer());
+    updateMemberPosition(session.accountId, player.mapName, destX, destY);
     log.debug(`Player ${player.charName} moved to (${destX},${destY})`);
     return PACKET_LEN;
   }
@@ -286,6 +335,85 @@ export class MapServer {
       y1 & 0xFF,
       ((8 << 4) | 8) & 0xFF, // sx=8, sy=8 (center of cell)
     ];
+  }
+
+  /** CZ_CONTACTNPC (0x0090): [header 2][npcId 4][type 1] = 7 */
+  private handleNpcContact(session: Session, buffer: Buffer): number {
+    if (buffer.length < 7) return 0;
+    const reader = new PacketReader(buffer);
+    reader.readUInt16LE();
+    const npcId = reader.readUInt32LE();
+    reader.readUInt8(); // type (0=click, 1=trigger area)
+    const player = this.players.get(session.accountId);
+    if (player) handleNpcClick(session.accountId, player.charId, npcId, session.socket);
+    return 7;
+  }
+
+  /** CZ_CHOOSE_MENU (0x00b8): [header 2][npcId 4][choice 1] = 7 */
+  private handleNpcMenu(session: Session, buffer: Buffer): number {
+    if (buffer.length < 7) return 0;
+    const reader = new PacketReader(buffer);
+    reader.readUInt16LE();
+    const npcId = reader.readUInt32LE();
+    const choice = reader.readUInt8();
+    handleMenuChoice(session.accountId, npcId, choice, session.socket);
+    return 7;
+  }
+
+  /** CZ_REQ_NEXT_SCRIPT (0x00b9): [header 2][npcId 4] = 6 */
+  private handleNpcNext(session: Session, buffer: Buffer): number {
+    if (buffer.length < 6) return 0;
+    const reader = new PacketReader(buffer);
+    reader.readUInt16LE();
+    const npcId = reader.readUInt32LE();
+    handleNextScript(session.accountId, npcId, session.socket);
+    return 6;
+  }
+
+  /** CZ_CLOSE_DIALOG (0x0146): [header 2][npcId 4] = 6 */
+  private handleNpcClose(session: Session, buffer: Buffer): number {
+    if (buffer.length < 6) return 0;
+    const reader = new PacketReader(buffer);
+    reader.readUInt16LE();
+    reader.readUInt32LE(); // npcId
+    handleCloseDialog(session.accountId);
+    return 6;
+  }
+
+  /** CZ_PC_PURCHASE_ITEMLIST (0x00c8): variable length */
+  private handleBuyItems(session: Session, buffer: Buffer): number {
+    const player = this.players.get(session.accountId);
+    if (!player) return buffer.length < 4 ? 0 : buffer.readUInt16LE(2);
+    return handleShopBuy(session.accountId, player.charId, buffer, session.socket);
+  }
+
+  /** CZ_REQUEST_ACT (0x0089): Attack [header 2][target 4][action 1] = 7 */
+  private handleAttack(session: Session, buffer: Buffer): number {
+    if (buffer.length < ATTACK_PACKET_LEN) return 0;
+    const player = this.players.get(session.accountId);
+    if (!player) return ATTACK_PACKET_LEN;
+    const targetGid = buffer.readUInt32LE(2);
+    const action = buffer.readUInt8(6);
+    return handleAttackRequest(
+      session.accountId, player.charId, player.charName,
+      player.baseLevel, targetGid, action, session.socket,
+    );
+  }
+
+  /** CZ_USE_SKILL (0x0113): Skill on target [header 2][lv 2][id 2][target 4] = 10 */
+  private handleSkill(session: Session, buffer: Buffer): number {
+    if (buffer.length < 10) return 0;
+    const player = this.players.get(session.accountId);
+    if (!player) return 10;
+    return handleUseSkill(session.accountId, player.charId, player.baseLevel, buffer, session.socket);
+  }
+
+  /** CZ_USE_SKILL_TOGROUND (0x0116): Skill on ground [header 2][lv 2][id 2][x 2][y 2] = 10 */
+  private handleSkillGround(session: Session, buffer: Buffer): number {
+    if (buffer.length < 10) return 0;
+    const player = this.players.get(session.accountId);
+    if (!player) return 10;
+    return handleUseSkillGround(session.accountId, player.charId, player.baseLevel, buffer, session.socket);
   }
 
   private handleKeepAlive(session: Session, buffer: Buffer): number {

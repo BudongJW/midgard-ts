@@ -153,6 +153,28 @@ export enum PacketId {
   CZ_REQUEST_CHAT       = 0x008c,  // Client -> Map: Chat message
   ZC_NOTIFY_CHAT        = 0x008d,  // Map -> Client: Chat broadcast
 
+  // NPC
+  CZ_CONTACTNPC         = 0x0090,  // Client -> Map: Click NPC
+  ZC_NPCACK_MAPMOVE     = 0x0091,  // Map -> Client: Warp to map
+  ZC_SAY_DIALOG         = 0x00b4,  // Map -> Client: NPC dialogue text
+  ZC_WAIT_DIALOG        = 0x00b5,  // Map -> Client: NPC "next" button
+  ZC_CLOSE_DIALOG       = 0x00b6,  // Map -> Client: Close dialogue
+  CZ_CHOOSE_MENU        = 0x00b8,  // Client -> Map: Menu choice
+  ZC_MENU_LIST          = 0x00b7,  // Map -> Client: Menu options
+  CZ_REQ_NEXT_SCRIPT    = 0x00b9,  // Client -> Map: Next dialogue
+  CZ_CLOSE_DIALOG       = 0x0146,  // Client -> Map: Close dialogue
+  ZC_NPCSPRITE_CHANGE   = 0x01b0,  // Map -> Client: NPC sprite (unused, for ref)
+
+  // NPC Shop
+  ZC_PC_PURCHASE_ITEMLIST = 0x00c6,  // Map -> Client: Shop item list
+  CZ_PC_PURCHASE_ITEMLIST = 0x00c8,  // Client -> Map: Buy items
+  CZ_PC_SELL_ITEMLIST     = 0x00c9,  // Client -> Map: Sell items
+  ZC_PC_PURCHASE_RESULT   = 0x00ca,  // Map -> Client: Buy result
+  ZC_PC_SELL_RESULT       = 0x00cb,  // Map -> Client: Sell result
+
+  // NPC Spawn
+  ZC_NOTIFY_STANDENTRY_NPC = 0x007c, // Map -> Client: NPC standing on map
+
   // Keep alive
   CZ_REQUEST_TIME       = 0x007e,  // Client -> Server: Tick
   ZC_NOTIFY_TIME        = 0x007f,  // Server -> Client: Tick reply
