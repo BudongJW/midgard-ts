@@ -28,16 +28,20 @@ export class LoginServer {
     this.config = config;
   }
 
-  start(): void {
-    const server = createServer((socket) => this.onConnection(socket));
-    const { host, port } = this.config.login;
+  start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const server = createServer((socket) => this.onConnection(socket));
+      const { host, port } = this.config.login;
 
-    server.listen(port, host, () => {
-      log.status(`Login server listening on ${host}:${port}`);
-    });
+      server.listen(port, host, () => {
+        log.status(`Login server listening on ${host}:${port}`);
+        resolve();
+      });
 
-    server.on('error', (err) => {
-      log.fatal(`Login server error: ${err.message}`);
+      server.on('error', (err) => {
+        log.fatal(`Login server error: ${err.message}`);
+        reject(err);
+      });
     });
   }
 

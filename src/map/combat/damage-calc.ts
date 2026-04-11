@@ -8,7 +8,8 @@
  *   FinalDmg = max(1, ATK - targetDEF) * variance
  */
 
-import { getMobDef, type MobInstance } from '../monster/mob-db.js';
+import { getMobDef } from '../monster/mob-db.js';
+import type { MobInstance } from '../monster/mob-spawner.js';
 
 export interface PlayerStats {
   baseLv: number;

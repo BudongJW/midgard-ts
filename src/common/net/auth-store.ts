@@ -56,6 +56,31 @@ class AuthStore {
     return true;
   }
 
+  /**
+   * Validate for map server: CZ_ENTER does not carry loginId2,
+   * so only loginId1 is checked here.
+   */
+  validateForMap(accountId: number, loginId1: number): boolean {
+    const entry = this.entries.get(accountId);
+    if (!entry) {
+      log.warn(`No session found for account ${accountId}`);
+      return false;
+    }
+
+    if (entry.loginId1 !== loginId1) {
+      log.warn(`Session mismatch for account ${accountId}`);
+      return false;
+    }
+
+    if (Date.now() - entry.createdAt > SESSION_TTL_MS) {
+      log.warn(`Session expired for account ${accountId}`);
+      this.entries.delete(accountId);
+      return false;
+    }
+
+    return true;
+  }
+
   consume(accountId: number): AuthEntry | undefined {
     const entry = this.entries.get(accountId);
     if (entry) {

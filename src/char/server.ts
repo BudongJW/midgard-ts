@@ -59,16 +59,20 @@ export class CharServer {
     this.config = config;
   }
 
-  start(): void {
-    const server = createServer((socket) => this.onConnection(socket));
-    const { host, port } = this.config.char;
+  start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const server = createServer((socket) => this.onConnection(socket));
+      const { host, port } = this.config.char;
 
-    server.listen(port, host, () => {
-      log.status(`Char server listening on ${host}:${port}`);
-    });
+      server.listen(port, host, () => {
+        log.status(`Char server listening on ${host}:${port}`);
+        resolve();
+      });
 
-    server.on('error', (err) => {
-      log.fatal(`Char server error: ${err.message}`);
+      server.on('error', (err) => {
+        log.fatal(`Char server error: ${err.message}`);
+        reject(err);
+      });
     });
   }
 
