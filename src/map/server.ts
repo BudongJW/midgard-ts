@@ -8,6 +8,7 @@ import { createServer, type Socket } from 'node:net';
 import { PacketReader, PacketWriter, PacketId } from '../common/packet/index.js';
 import { createLogger } from '../common/logger/index.js';
 import { execute, queryOne } from '../common/database/index.js';
+import { getEquipAtk, getEquipDef } from './item/inventory.js';
 import { SessionManager, type Session } from '../common/net/session.js';
 import { authStore } from '../common/net/auth-store.js';
 import type { ServerConfig } from '../common/config/index.js';
@@ -15,9 +16,9 @@ import {
   sendNpcSpawns, handleNpcClick, handleMenuChoice,
   handleNextScript, handleCloseDialog, handleShopBuy,
 } from './npc/npc-handler.js';
-import { initMapSpawns, getMonstersOnMap, tickMobAi } from './monster/mob-spawner.js';
+import { initMapSpawns, getMonstersOnMap, tickMobAi, type GetPlayerPos, type DamagePlayerFn, type BroadcastFn } from './monster/mob-spawner.js';
 import {
-  handleAttackRequest, ATTACK_PACKET_ID, ATTACK_PACKET_LEN,
+  handleAttackRequest, ATTACK_PACKET_ID, ATTACK_PACKET_LEN, type ExpDropRates,
 } from './combat/combat-handler.js';
 import {
   handleUseSkill, handleUseSkillGround,
@@ -40,6 +41,15 @@ interface PlayerState {
   speed: number;
   baseLevel: number;
   jobLevel: number;
+  // Cached combat stats — populated on map entry, refreshed on equip change
+  str: number;
+  agi: number;
+  vit: number;
+  int: number;
+  dex: number;
+  luk: number;
+  equipAtk: number;
+  equipDef: number;
 }
 
 const MAX_CHAT_LENGTH = 255;
@@ -56,7 +66,8 @@ export class MapServer {
 
   private activeMaps = new Set<string>();
 
-  start(): void {
+  start(): Promise<void> {
+    return new Promise((resolve, reject) => {
     const server = createServer((socket) => this.onConnection(socket));
     const { host, port } = this.config.map;
 
@@ -69,8 +80,22 @@ export class MapServer {
     // Monster AI + pet hunger tick every 1 second
     setInterval(() => {
       const now = Date.now();
+
+      const getPlayerPos: GetPlayerPos = (accountId) => {
+        const p = this.players.get(accountId);
+        return p ? { x: p.x, y: p.y } : undefined;
+      };
+
+      const damagePlayer: DamagePlayerFn = (accountId, damage) => {
+        this.applyMobDamageToPlayer(accountId, damage);
+      };
+
+      const broadcast: BroadcastFn = (mapName, data) => {
+        this.broadcastToMap(mapName, data);
+      };
+
       for (const map of this.activeMaps) {
-        tickMobAi(map, now);
+        tickMobAi(map, now, getPlayerPos, damagePlayer, broadcast);
       }
       for (const [, player] of this.players) {
         tickPetHunger(player.charId, now);
@@ -79,11 +104,14 @@ export class MapServer {
 
     server.listen(port, host, () => {
       log.status(`Map server listening on ${host}:${port}`);
+      resolve();
     });
 
     server.on('error', (err) => {
       log.fatal(`Map server error: ${err.message}`);
+      reject(err);
     });
+    }); // end Promise
   }
 
   private onConnection(socket: Socket): void {
@@ -184,8 +212,8 @@ export class MapServer {
     const clientTick = reader.readUInt32LE();
     session.sex = reader.readUInt8();
 
-    // Validate session from char server
-    if (!authStore.validate(session.accountId, session.loginId1, session.loginId2)) {
+    // Validate session from char server (CZ_ENTER does not carry loginId2)
+    if (!authStore.validateForMap(session.accountId, session.loginId1)) {
       log.warn(`Auth failed for account ${session.accountId} from ${session.ip}`);
       session.socket.destroy();
       return PACKET_LEN;
@@ -195,8 +223,9 @@ export class MapServer {
     const char = queryOne<{
       id: number; name: string; last_map: string; last_x: number; last_y: number;
       base_level: number; job_level: number;
+      str: number; agi: number; vit: number; int_: number; dex: number; luk: number;
     }>(
-      'SELECT id, name, last_map, last_x, last_y, base_level, job_level FROM characters WHERE id = ? AND account_id = ?',
+      'SELECT id, name, last_map, last_x, last_y, base_level, job_level, str, agi, vit, int_, dex, luk FROM characters WHERE id = ? AND account_id = ?',
       [charId, session.accountId],
     );
 
@@ -215,6 +244,14 @@ export class MapServer {
       speed: 150,
       baseLevel: char.base_level,
       jobLevel: char.job_level,
+      str: char.str,
+      agi: char.agi,
+      vit: char.vit,
+      int: char.int_,
+      dex: char.dex,
+      luk: char.luk,
+      equipAtk: getEquipAtk(charId),
+      equipDef: getEquipDef(charId),
     };
     this.players.set(session.accountId, state);
 
@@ -275,7 +312,7 @@ export class MapServer {
     const moveData = this.encodeMovePosition(fromX, fromY, destX, destY);
     for (const byte of moveData) writer.writeUInt8(byte);
 
-    session.socket.write(writer.toBuffer());
+    this.broadcastToMap(player.mapName, writer.toBuffer());
     updateMemberPosition(session.accountId, player.mapName, destX, destY);
     log.debug(`Player ${player.charName} moved to (${destX},${destY})`);
     return PACKET_LEN;
@@ -313,7 +350,7 @@ export class MapServer {
     writer.writeBytes(msgBytes);
     writer.writeUInt8(0);
 
-    session.socket.write(writer.toBuffer());
+    this.broadcastToMap(player.mapName, writer.toBuffer());
     return length;
   }
 
@@ -401,9 +438,19 @@ export class MapServer {
     if (!player) return ATTACK_PACKET_LEN;
     const targetGid = buffer.readUInt32LE(2);
     const action = buffer.readUInt8(6);
+    const rates: ExpDropRates = {
+      baseExpRate: this.config.map.baseExpRate,
+      jobExpRate: this.config.map.jobExpRate,
+      dropRate: this.config.map.dropRate,
+    };
+    const cachedStats = {
+      str: player.str, agi: player.agi, vit: player.vit,
+      int: player.int, dex: player.dex, luk: player.luk,
+      equipAtk: player.equipAtk, equipDef: player.equipDef,
+    };
     return handleAttackRequest(
       session.accountId, player.charId, player.charName,
-      player.baseLevel, targetGid, action, session.socket,
+      player.baseLevel, targetGid, action, session.socket, rates, cachedStats,
     );
   }
 
@@ -434,5 +481,51 @@ export class MapServer {
     writer.writeUInt32LE(clientTick);
     session.socket.write(writer.toBuffer());
     return 6;
+  }
+
+  /**
+   * Broadcast a packet to all players currently on the given map.
+   */
+  private broadcastToMap(mapName: string, data: Buffer): void {
+    for (const [accountId, player] of this.players) {
+      if (player.mapName !== mapName) continue;
+      const session = this.sessions.getByAccountId(accountId);
+      session?.socket.write(data);
+    }
+  }
+
+  /**
+   * Apply mob->player damage: deduct HP in DB and send ZC_NOTIFY_ACT to the player.
+   * ZC_NOTIFY_ACT (0x008a): src=mobGid, dst=accountId, damage, type=0
+   */
+  private applyMobDamageToPlayer(accountId: number, damage: number): void {
+    const player = this.players.get(accountId);
+    if (!player) return;
+
+    const session = this.sessions.getByAccountId(accountId);
+    if (!session) return;
+
+    // Deduct HP (clamp to 0)
+    execute(
+      'UPDATE characters SET hp = MAX(0, hp - ?) WHERE id = ?',
+      [damage, player.charId],
+    );
+
+    // ZC_NOTIFY_ACT: [header 2][src 4][dst 4][tick 4][srcDelay 4][dstDelay 4][dmg 2][div 2][type 1][pad 2]
+    const ZC_NOTIFY_ACT = 0x008a;
+    const writer = new PacketWriter(29);
+    writer.writeUInt16LE(ZC_NOTIFY_ACT);
+    writer.writeUInt32LE(0);          // src gid (mob gid unknown here — use 0 as placeholder)
+    writer.writeUInt32LE(accountId);  // dst = player
+    writer.writeUInt32LE(Date.now() & 0xFFFFFFFF);
+    writer.writeUInt32LE(480);
+    writer.writeUInt32LE(480);
+    writer.writeUInt16LE(Math.min(damage, 0xFFFF));
+    writer.writeUInt16LE(1);
+    writer.writeUInt8(0);
+    writer.writeUInt16LE(0);
+    session.socket.write(writer.toBuffer());
+
+    log.debug(`Mob dealt ${damage} to ${player.charName}`);
   }
 }

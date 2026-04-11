@@ -45,14 +45,14 @@ async function main(): Promise<void> {
   // Initialize database (async — sql.js needs WASM init)
   await initDatabase(config.database.path);
 
-  // Start servers
+  // Start servers — fail fast if any port is unavailable
   const loginServer = new LoginServer(config);
   const charServer = new CharServer(config);
   const mapServer = new MapServer(config);
 
-  loginServer.start();
-  charServer.start();
-  mapServer.start();
+  await loginServer.start();
+  await charServer.start();
+  await mapServer.start();
 
   log.status('All servers started successfully');
   log.info(`Login: ${config.login.host}:${config.login.port}`);

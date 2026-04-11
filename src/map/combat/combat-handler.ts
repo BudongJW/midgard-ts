@@ -9,7 +9,7 @@ import { execute, queryOne } from '../../common/database/index.js';
 import { calcPlayerDamage, calcMobDamage, checkHit, type PlayerStats } from './damage-calc.js';
 import { damageMob, getMonsterByGid, type MobInstance } from '../monster/mob-spawner.js';
 import { getMobDef } from '../monster/mob-db.js';
-import { getEquipAtk, getEquipDef, addItem } from '../item/inventory.js';
+import { addItem } from '../item/inventory.js';
 import { createLogger } from '../../common/logger/index.js';
 import type { Socket } from 'node:net';
 
@@ -19,10 +19,10 @@ const log = createLogger('Combat');
 const ZC_NOTIFY_ACT = 0x008a;        // Damage display
 const CZ_REQUEST_ACT = 0x0089;       // Attack request
 
-interface AttackResult {
-  damage: number;
-  isCrit: boolean;
-  killed: boolean;
+export interface ExpDropRates {
+  baseExpRate: number;  // 100 = 1x
+  jobExpRate: number;
+  dropRate: number;
 }
 
 /**
@@ -38,6 +38,8 @@ export function handleAttackRequest(
   targetGid: number,
   action: number,
   socket: Socket,
+  rates: ExpDropRates = { baseExpRate: 100, jobExpRate: 100, dropRate: 100 },
+  cachedStats?: Partial<PlayerStats>,
 ): number {
   const mob = getMonsterByGid(targetGid);
   if (!mob) return 7;
@@ -45,31 +47,21 @@ export function handleAttackRequest(
   const def = getMobDef(mob.mobId);
   if (!def) return 7;
 
-  // Build player stats
-  const char = queryOne<{
-    str: number; agi: number; vit: number;
-    int: number; dex: number; luk: number;
-  }>(
-    'SELECT str, agi, vit, int_, dex, luk FROM characters WHERE id = ?',
-    [charId],
-  );
-
-  if (!char) return 7;
-
+  // Use cached stats from PlayerState (populated on map entry) to avoid per-attack DB queries
   const playerStats: PlayerStats = {
     baseLv,
-    str: char.str,
-    agi: char.agi,
-    vit: char.vit,
-    int: char.int,
-    dex: char.dex,
-    luk: char.luk,
-    equipAtk: getEquipAtk(charId),
-    equipDef: getEquipDef(charId),
+    str: cachedStats?.str ?? 1,
+    agi: cachedStats?.agi ?? 1,
+    vit: cachedStats?.vit ?? 1,
+    int: cachedStats?.int ?? 1,
+    dex: cachedStats?.dex ?? 1,
+    luk: cachedStats?.luk ?? 1,
+    equipAtk: cachedStats?.equipAtk ?? 0,
+    equipDef: cachedStats?.equipDef ?? 0,
   };
 
   // HIT check
-  if (!checkHit(char.dex, baseLv, def.agi, def.level)) {
+  if (!checkHit(playerStats.dex, baseLv, def.agi, def.level)) {
     sendDamagePacket(socket, accountId, targetGid, 0, 0); // Miss
     return 7;
   }
@@ -80,7 +72,7 @@ export function handleAttackRequest(
   sendDamagePacket(socket, accountId, targetGid, damage, killed ? 1 : 0);
 
   if (killed) {
-    onMobKill(accountId, charId, charName, baseLv, mob, socket);
+    onMobKill(accountId, charId, charName, baseLv, mob, socket, rates);
   }
 
   return 7;
@@ -105,13 +97,14 @@ function sendDamagePacket(socket: Socket, srcGid: number, dstGid: number, damage
 function onMobKill(
   accountId: number, charId: number, charName: string,
   baseLv: number, mob: MobInstance, socket: Socket,
+  rates: ExpDropRates,
 ): void {
   const def = getMobDef(mob.mobId);
   if (!def) return;
 
-  // Award EXP (affected by server rate config — use 1x for now)
-  const baseExp = def.baseExp;
-  const jobExp = def.jobExp;
+  // Apply server EXP rates (100 = 1x)
+  const baseExp = Math.floor(def.baseExp * rates.baseExpRate / 100);
+  const jobExp = Math.floor(def.jobExp * rates.jobExpRate / 100);
 
   execute(
     'UPDATE characters SET base_exp = base_exp + ?, job_exp = job_exp + ? WHERE id = ?',
@@ -120,10 +113,11 @@ function onMobKill(
 
   log.info(`${charName} killed ${def.name}: +${baseExp} base / +${jobExp} job EXP`);
 
-  // Drop items
+  // Drop items — apply server drop rate
   for (const drop of def.drops) {
+    const effectiveRate = Math.floor(drop.rate * rates.dropRate / 100);
     const roll = Math.floor(Math.random() * 10000);
-    if (roll < drop.rate) {
+    if (roll < effectiveRate) {
       const result = addItem(charId, drop.itemId, 1);
       if (result.success) {
         log.debug(`Drop: item ${drop.itemId} for ${charName}`);
@@ -135,46 +129,85 @@ function onMobKill(
   checkLevelUp(charId, charName, socket);
 }
 
+// ZC_STATUS_CHANGE (0x00bc): notify client of a single stat change
+// field: 0x0020=BaseLevel, 0x0021=JobLevel, 0x0028=StatusPoint, 0x002f=SkillPoint
+const ZC_STATUS_CHANGE = 0x00bc;
+
+function sendStatusChange(socket: Socket, field: number, value: number): void {
+  const writer = new PacketWriter(8);
+  writer.writeUInt16LE(ZC_STATUS_CHANGE);
+  writer.writeUInt16LE(field);
+  writer.writeUInt32LE(value);
+  socket.write(writer.toBuffer());
+}
+
 /**
- * Simplified level-up check
- * EXP table: baseExp needed = level * level * 10
+ * Level-up check — loops until EXP is insufficient to level up further.
+ * EXP table: baseExpNeeded = level * level * 10
+ * Sends ZC_STATUS_CHANGE packets to notify the client.
  */
 function checkLevelUp(charId: number, charName: string, socket: Socket): void {
   const char = queryOne<{
     base_level: number; job_level: number;
     base_exp: number; job_exp: number;
     status_point: number; skill_point: number;
-    str: number; agi: number; vit: number;
-    int: number; dex: number; luk: number;
   }>(
-    'SELECT base_level, job_level, base_exp, job_exp, status_point, skill_point, str, agi, vit, int_, dex, luk FROM characters WHERE id = ?',
+    'SELECT base_level, job_level, base_exp, job_exp, status_point, skill_point FROM characters WHERE id = ?',
     [charId],
   );
 
   if (!char) return;
 
-  let leveled = false;
+  let baseLevel = char.base_level;
+  let jobLevel = char.job_level;
+  let baseExp = char.base_exp;
+  let jobExp = char.job_exp;
+  let statusPoint = char.status_point;
+  let skillPoint = char.skill_point;
+  let baseLeveled = false;
+  let jobLeveled = false;
 
-  // Base level up
-  const baseExpNeeded = char.base_level * char.base_level * 10;
-  if (char.base_exp >= baseExpNeeded && char.base_level < 99) {
-    execute(
-      'UPDATE characters SET base_level = base_level + 1, base_exp = base_exp - ?, status_point = status_point + ? WHERE id = ?',
-      [baseExpNeeded, 5, charId],
-    );
-    log.status(`${charName} base level up! -> ${char.base_level + 1}`);
-    leveled = true;
+  // Base level up — loop to handle multiple levels from one kill
+  while (baseLevel < 99) {
+    const needed = baseLevel * baseLevel * 10;
+    if (baseExp < needed) break;
+    baseExp -= needed;
+    baseLevel++;
+    statusPoint += 5;
+    baseLeveled = true;
+    log.status(`${charName} base level up! -> ${baseLevel}`);
   }
 
-  // Job level up
-  const jobExpNeeded = char.job_level * char.job_level * 5;
-  if (char.job_exp >= jobExpNeeded && char.job_level < 50) {
-    execute(
-      'UPDATE characters SET job_level = job_level + 1, job_exp = job_exp - ?, skill_point = skill_point + 1 WHERE id = ?',
-      [jobExpNeeded, charId],
-    );
-    log.status(`${charName} job level up! -> ${char.job_level + 1}`);
-    leveled = true;
+  // Job level up — loop
+  while (jobLevel < 50) {
+    const needed = jobLevel * jobLevel * 5;
+    if (jobExp < needed) break;
+    jobExp -= needed;
+    jobLevel++;
+    skillPoint++;
+    jobLeveled = true;
+    log.status(`${charName} job level up! -> ${jobLevel}`);
+  }
+
+  if (!baseLeveled && !jobLeveled) return;
+
+  execute(
+    `UPDATE characters SET
+      base_level = ?, job_level = ?,
+      base_exp = ?, job_exp = ?,
+      status_point = ?, skill_point = ?
+     WHERE id = ?`,
+    [baseLevel, jobLevel, baseExp, jobExp, statusPoint, skillPoint, charId],
+  );
+
+  // Notify client of updated values
+  if (baseLeveled) {
+    sendStatusChange(socket, 0x0020, baseLevel);       // BaseLevel
+    sendStatusChange(socket, 0x0028, statusPoint);     // StatusPoint
+  }
+  if (jobLeveled) {
+    sendStatusChange(socket, 0x0021, jobLevel);        // JobLevel
+    sendStatusChange(socket, 0x002f, skillPoint);      // SkillPoint
   }
 }
 
